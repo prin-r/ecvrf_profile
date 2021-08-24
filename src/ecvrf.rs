@@ -1,6 +1,6 @@
-use std::str;
 use hex::{decode, encode};
 use rug::{Assign, Integer};
+use std::str;
 
 lazy_static! {
     static ref SUITE_STRING: Vec<u8> = decode("04").unwrap();
@@ -122,43 +122,43 @@ pub fn x_recover(y: &Integer) -> Integer {
     }
 }
 
-pub fn decode_point(s: &[u8]) -> Option<(Integer,Integer)> {
+pub fn decode_point(s: &mut [u8]) -> Option<(Integer, Integer)> {
     s.reverse();
-    let y = (&encode(s).parse::<Integer>().ok()?) & ((Integer::from(1) << 255) - 1);
-    let mut x = x_recover(y);
-    if x & 1 != s[s.len()-1] & 1 {
+    let y = (encode(&s).parse::<Integer>().ok()?) & ((Integer::from(1) << 255) - 1);
+    let mut x = x_recover(&y);
+    if Integer::from(&x & 1) != s[s.len() - 1] & 1 {
         x = &*PRIME - x;
     }
-    let p = (x, *y);
-    if not _is_on_curve(p):
-        return "INVALID"
-    return p
+    let p = (x, y);
+    // if not _is_on_curve(p):
+    //     return "INVALID"
+    Some(p)
 }
 
-pub fn ecvrf_decode_proof(pi: Vec<u8>) -> Option<((Integer,Integer),Integer,Integer)> {
+pub fn ecvrf_decode_proof(pi: Vec<u8>) -> Option<((Integer, Integer), Integer, Integer)> {
     if pi.len() != 80 {
-        return None
+        return None;
     }
 
-    let gamma_string = &pi[0..32];
-    let c_string = &pi[32..48];
-    let s_string = &pi[48..];
+    // let gamma_string = &pi[0..32];
+    // let c_string = &pi[32..48];
+    // let s_string = &pi[48..];
 
-    # 4. Gamma = string_to_point(gamma_string)
-    gamma = _decode_point(gamma_string)
+    // # 4. Gamma = string_to_point(gamma_string)
+    // gamma = _decode_point(gamma_string)
 
-    # 5. if Gamma = "INVALID" output "INVALID" and stop.
-    if gamma == "INVALID":
-        return "INVALID"
+    // # 5. if Gamma = "INVALID" output "INVALID" and stop.
+    // if gamma == "INVALID":
+    //     return "INVALID"
 
-    # 6. c = string_to_int(c_string)
-    c = int.from_bytes(c_string, 'little')
+    // # 6. c = string_to_int(c_string)
+    // c = int.from_bytes(c_string, 'little')
 
-    # 7. s = string_to_int(s_string)
-    s = int.from_bytes(s_string, 'little')
+    // # 7. s = string_to_int(s_string)
+    // s = int.from_bytes(s_string, 'little')
 
-    # 8. Output Gamma, c, and s
-    return gamma, c, s
+    // # 8. Output Gamma, c, and s
+    return None;
 }
 
 pub fn ecvrf_verify(y: Vec<u8>, pi: Vec<u8>, alpha: Vec<u8>) -> bool {
