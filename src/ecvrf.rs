@@ -232,7 +232,7 @@ pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Ve
 
     let mut tv1 = Integer::from(&u * &u);
     tv1 = modulus(&(2 * tv1), &*PRIME);
-    if tv1 == Integer::from(-1) {
+    if tv1 == Integer::from(&*PRIME - 1) {
         tv1 = Integer::from(0);
     }
 
