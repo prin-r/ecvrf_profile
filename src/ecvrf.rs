@@ -1,6 +1,15 @@
 use hex::{decode, encode};
-use rug::{Assign, Integer};
-use std::str;
+use rug::{integer::Order, Integer};
+use sha2::{Digest, Sha512};
+
+macro_rules! some_or_return_false {
+    ( $e:expr ) => {
+        match $e {
+            Some(x) => x,
+            None => return false,
+        }
+    };
+}
 
 lazy_static! {
     static ref SUITE_STRING: Vec<u8> = decode("04").unwrap();
@@ -52,31 +61,73 @@ lazy_static! {
     );
 }
 
+pub fn hash(h: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha512::new();
+    hasher.update(h);
+    hasher.finalize().to_vec()
+}
+
+pub fn x_recover(y: &Integer) -> Integer {
+    let xx =
+        (y * y - Integer::from(1)) * inverse(&((&*D) * Integer::from(y * y) + Integer::from(1)));
+
+    let mut x = Integer::from(
+        xx.pow_mod_ref(&((&*PRIME + Integer::from(3)) >> 3), &*PRIME)
+            .unwrap(),
+    );
+    if modulus(&((&x * &x) - xx), &*PRIME) != Integer::from(0) {
+        x = modulus(&Integer::from(x * (&*II)), &*PRIME);
+    }
+    if &x & Integer::from(1) != 0 {
+        &*PRIME - x
+    } else {
+        x
+    }
+}
+
+pub fn is_on_curve(p: &(Integer, Integer)) -> bool {
+    let x_2 = Integer::from(&p.0 * &p.0);
+    let y_2 = Integer::from(&p.1 * &p.1);
+    modulus(
+        &(Integer::from(&y_2 - &x_2) - 1 - x_2 * y_2 * (&*D)),
+        &*PRIME,
+    ) == 0
+}
+
+pub fn encode_point(p: &(Integer, Integer)) -> Vec<u8> {
+    let mut q: Integer =
+        (&p.1 & ((Integer::from(1) << 255) - 1)) + (Integer::from(&p.0 & 1) << 255);
+    let mut q_bytes_little: Vec<u8> = vec![0; 32];
+    for i in 0..32 {
+        q_bytes_little[i] = Integer::from(&q & 255).to_u8().unwrap();
+        q >>= 8;
+        if q < 1 {
+            break;
+        }
+    }
+    q_bytes_little
+}
+
+pub fn decode_point(s: &[u8]) -> Option<(Integer, Integer)> {
+    let y = Integer::from_digits(&s, Order::Lsf) & ((Integer::from(1) << 255) - 1);
+    let mut x = x_recover(&y);
+    if Integer::from(&x & 1) != (s.last()? >> 7) & 1 {
+        x = &*PRIME - x;
+    }
+    let p = (x, y);
+    if is_on_curve(&p) {
+        Some(p)
+    } else {
+        None
+    }
+}
+
 pub fn modulus(a: &Integer, b: &Integer) -> Integer {
-    <(Integer, Integer)>::from(a.div_rem_euc_ref(b)).1
+    Integer::from(a + b) % b
 }
 
 pub fn inverse(a: &Integer) -> Integer {
     a.clone().invert(&*PRIME).unwrap_or(Integer::from(1))
-}
-
-pub fn pow(a: &Integer, b: &Integer, c: &Integer) -> Integer {
-    let mut base = a.clone();
-    let mut exp = b.clone();
-    let m = c.clone();
-    if m == 1 {
-        return Integer::from(0);
-    }
-    let mut result = Integer::from(1);
-    base = modulus(&base, &m);
-    while exp > 0 {
-        if Integer::from((&exp) & 1) == 1 {
-            result = modulus(&Integer::from(&result * &base), &m);
-        }
-        exp >>= 1;
-        base = modulus(&Integer::from(&base * &base), &m);
-    }
-    result
 }
 
 pub fn edwards_add(a: &(Integer, Integer), b: &(Integer, Integer)) -> (Integer, Integer) {
@@ -104,80 +155,514 @@ pub fn scalar_multiply(p: &(Integer, Integer), scalar: &Integer) -> Option<(Inte
     Some(q)
 }
 
-pub fn x_recover(y: &Integer) -> Integer {
-    let xx =
-        (y * y - Integer::from(1)) * inverse(&((&*D) * Integer::from(y * y) + Integer::from(1)));
-    let mut x = pow(
-        &xx,
-        &((&*PRIME + Integer::from(3)) / Integer::from(8)),
-        &*PRIME,
-    );
-    if modulus(&(&x * &x - xx), &*PRIME) != Integer::from(0) {
-        x = modulus(&Integer::from(&x * (&*II)), &*PRIME);
-    }
-    if &x & Integer::from(1) != 0 {
-        &*PRIME - x
-    } else {
-        x
-    }
-}
-
-pub fn decode_point(s: &mut [u8]) -> Option<(Integer, Integer)> {
-    s.reverse();
-    let y = (encode(&s).parse::<Integer>().ok()?) & ((Integer::from(1) << 255) - 1);
-    let mut x = x_recover(&y);
-    if Integer::from(&x & 1) != s[s.len() - 1] & 1 {
-        x = &*PRIME - x;
-    }
-    let p = (x, y);
-    // if not _is_on_curve(p):
-    //     return "INVALID"
-    Some(p)
-}
-
-pub fn ecvrf_decode_proof(pi: Vec<u8>) -> Option<((Integer, Integer), Integer, Integer)> {
+pub fn ecvrf_decode_proof(pi: &[u8]) -> Option<((Integer, Integer), Integer, Integer)> {
     if pi.len() != 80 {
         return None;
     }
 
-    // let gamma_string = &pi[0..32];
-    // let c_string = &pi[32..48];
-    // let s_string = &pi[48..];
+    let gamma = decode_point(&pi[0..32])?;
+    let c = Integer::from_digits(&pi[32..48], Order::Lsf);
+    let s = Integer::from_digits(&pi[48..], Order::Lsf);
 
-    // # 4. Gamma = string_to_point(gamma_string)
-    // gamma = _decode_point(gamma_string)
+    Some((gamma, c, s))
+}
 
-    // # 5. if Gamma = "INVALID" output "INVALID" and stop.
-    // if gamma == "INVALID":
-    //     return "INVALID"
+pub fn i2osp(x: &Integer, x_len: u8) -> Option<Vec<u8>> {
+    match x_len {
+        1 => {
+            if Integer::from(x >> 8) >= 1 {
+                return None;
+            }
+        }
+        2 => {
+            if Integer::from(x >> 16) >= 1 {
+                return None;
+            }
+        }
+        128 => {
+            if Integer::from(x >> 1024) >= 1 {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let mut digits = vec![0u8; x_len as usize];
+    let mut tmp_x = x.clone();
+    for i in (0..(x_len as usize)).rev() {
+        digits[i] = (&tmp_x & Integer::from(255)).to_u8().unwrap();
+        tmp_x >>= 8;
+    }
 
-    // # 6. c = string_to_int(c_string)
-    // c = int.from_bytes(c_string, 'little')
+    Some(digits)
+}
 
-    // # 7. s = string_to_int(s_string)
-    // s = int.from_bytes(s_string, 'little')
+pub fn os2ip(x: &[u8]) -> Integer {
+    Integer::from_digits(x, Order::Msf)
+}
 
-    // # 8. Output Gamma, c, and s
-    return None;
+pub fn expand_message_xmd(msg: &[u8], dst: &[u8], len_in_bytes: &Integer) -> Option<Vec<u8>> {
+    let dst_prime = [dst, &i2osp(&Integer::from(dst.len()), 1)?].concat();
+    let z_pad = i2osp(&Integer::from(0), 128)?;
+    let l_i_b_str = i2osp(len_in_bytes, 2)?;
+    let msg_prime = [
+        &z_pad,
+        msg,
+        &l_i_b_str,
+        &i2osp(&Integer::from(0), 1)?,
+        &dst_prime,
+    ]
+    .concat();
+    Some(hash(
+        &[hash(&msg_prime), i2osp(&Integer::from(1), 1)?, dst_prime].concat(),
+    ))
+}
+
+pub fn hash_to_field(msg: &[u8], count: &Integer) -> Option<Integer> {
+    let m = Integer::from(1);
+    let l = Integer::from(48);
+    let uniform_bytes = expand_message_xmd(msg, &*DST, &(count * m * l))?;
+    Some(modulus(&os2ip(&uniform_bytes[..48]), &*PRIME))
+}
+
+pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Vec<u8>> {
+    let u = hash_to_field(&[y, alpha].concat(), &Integer::from(1))?;
+
+    let mut tv1 = Integer::from(&u * &u);
+    tv1 = modulus(&(2 * tv1), &*PRIME);
+    if tv1 == Integer::from(-1) {
+        tv1 = Integer::from(0);
+    }
+
+    let mut x1 = inverse(&modulus(&(tv1.clone() + 1), &*PRIME));
+    x1 = modulus(&(Integer::from(-&*A) * x1), &*PRIME);
+    let mut gx1 = modulus(&(x1.clone() + &*A), &*PRIME);
+    gx1 = modulus(&(gx1 * x1.clone()), &*PRIME);
+    gx1 = modulus(&(gx1 + 1), &*PRIME);
+    gx1 = modulus(&(gx1 * x1.clone()), &*PRIME);
+    let mut x2 = modulus(&(-x1.clone() - &*A), &*PRIME);
+    let mut gx2 = modulus(&(tv1 * gx1.clone()), &*PRIME);
+
+    let e2 = match Integer::from(
+        gx1.pow_mod_ref(&(Integer::from(&*PRIME - 1) >> 1), &*PRIME)
+            .unwrap(),
+    )
+    .to_u8()
+    {
+        Some(0) => true,
+        Some(1) => true,
+        _ => false,
+    };
+
+    let mut x = x2;
+    let mut gx = gx2;
+    if e2 {
+        x = x1;
+        gx = gx1;
+    }
+
+    let edwards_y = modulus(&(Integer::from(x.clone() - 1) * inverse(&(x + 1))), &*PRIME);
+    // edwards_y.to_di
+
+    None
+}
+
+pub fn ecvrf_hash_points(
+    p1: &(Integer, Integer),
+    p2: &(Integer, Integer),
+    p3: &(Integer, Integer),
+    p4: &(Integer, Integer),
+) -> Integer {
+    let s_string = [
+        &SUITE_STRING[..],
+        &vec![2u8][..],
+        &encode_point(p1)[..],
+        &encode_point(p2)[..],
+        &encode_point(p3)[..],
+        &encode_point(p4)[..],
+        &vec![0u8][..],
+    ]
+    .concat();
+
+    let c_string = hash(&s_string);
+    let truncated_c_string = &c_string[0..16];
+
+    Integer::from_digits(&truncated_c_string, Order::Lsf)
 }
 
 pub fn ecvrf_verify(y: Vec<u8>, pi: Vec<u8>, alpha: Vec<u8>) -> bool {
-    let d = ecvrf_decode_proof(pi);
-    true
+    let (gamma, c, s) = some_or_return_false!(ecvrf_decode_proof(&pi));
+
+    let h = some_or_return_false!(ecvrf_hash_to_curve_elligator2_25519(&y, &alpha));
+    let y_point = some_or_return_false!(decode_point(&y));
+
+    let h_point = some_or_return_false!(decode_point(&h));
+
+    let s_b = some_or_return_false!(scalar_multiply(&*BASE, &s));
+    let c_y = some_or_return_false!(scalar_multiply(&y_point, &c));
+    let nc_y = (&*PRIME - c_y.0, c_y.1);
+    let u = edwards_add(&s_b, &nc_y);
+
+    let s_h = some_or_return_false!(scalar_multiply(&h_point, &s));
+    let c_g = some_or_return_false!(scalar_multiply(&gamma, &c));
+    let nc_g = (&*PRIME - c_g.0, c_g.1);
+    let v = edwards_add(&nc_g, &s_h);
+
+    let cp = ecvrf_hash_points(&h_point, &gamma, &u, &v);
+
+    c == cp
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
-    use sha3::Keccak256;
-    use std::str::FromStr;
+
+    #[test]
+    fn hash_test() {
+        assert_eq!(
+            encode(hash(&vec![
+                1u8, 2u8, 4u8, 8u8, 16u8, 32u8, 64u8, 128u8, 255u8
+            ])),
+            "4c506ee4b2f5e349ef7d7a801a2cdaf7a265d23bc04a67acfdde1a9f46aac3fb6c25e9d87ce835328f95627c411c22e016edc142bd7df26d2d09bcff6cd8563c"
+        );
+    }
+
+    #[test]
+    fn is_on_curve_test() {
+        assert_eq!(is_on_curve(&(Integer::from(0), Integer::from(1))), true);
+        assert_eq!(
+            is_on_curve(&(
+                "2467584584982761739087903239975580076073426676744013905948960903141708961180"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "4882184778386801025813782108981700325881234329435150280746293678017607916296"
+                    .parse::<Integer>()
+                    .unwrap()
+            )),
+            true
+        );
+        assert_eq!(
+            is_on_curve(&(
+                "2467584584982761739087903239975580076073426676744013905948960903141708961180"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "4882184778386801025813782108981700325881234329435150280746293678017607916295"
+                    .parse::<Integer>()
+                    .unwrap()
+            )),
+            false
+        );
+        assert_eq!(
+            is_on_curve(&(
+                "2467584584982761739087903239975580076073426676744013905948960903141708961181"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "4882184778386801025813782108981700325881234329435150280746293678017607916296"
+                    .parse::<Integer>()
+                    .unwrap()
+            )),
+            false
+        );
+    }
+
+    #[test]
+    fn x_recover_test() {
+        assert_eq!(
+            x_recover(&"1".parse::<Integer>().unwrap()),
+            "0".parse::<Integer>().unwrap()
+        );
+        assert_eq!(
+            x_recover(&"1000000".parse::<Integer>().unwrap()),
+            "42264365937216995767569786311423113212193185317045903349677162665330205787882"
+                .parse::<Integer>()
+                .unwrap()
+        );
+        assert_eq!(
+            x_recover(
+                &"5490344842503262896049970157107921391700051501439740859138324399589050432176"
+                    .parse::<Integer>()
+                    .unwrap()
+            ),
+            "40693201237000043021686838142473729874979326212385650705970612165939555930168"
+                .parse::<Integer>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn encode_point_test() {
+        assert_eq!(
+            encode_point(&(Integer::from(0), Integer::from(1))),
+            decode("0100000000000000000000000000000000000000000000000000000000000000").unwrap()
+        );
+        assert_eq!(
+            encode_point(&(
+                "5490344842503262896049970157107921391700051501439740859138324399589050432176"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "6892623829087957149769104661949562962747386908121354426791544695725788966110"
+                    .parse::<Integer>()
+                    .unwrap()
+            )),
+            decode("de2c8f6440ccc8b39a44cbb881a0c8ba2be8082f641e285e049c24033b163d0f").unwrap()
+        );
+        assert_eq!(
+            encode_point(&(
+                "11765910627670138205555954470128887569457785139558335884609577674421928602465"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "18209892540234382838474494422429649302902580183111935078055540371838462697257"
+                    .parse::<Integer>()
+                    .unwrap()
+            )),
+            decode("299f6d20010556799ff82f2ad721bd15732f7533cfc6ad8bf333cd22166f42a8").unwrap()
+        );
+    }
+
+    #[test]
+    fn decode_point_test() {
+        assert_eq!(
+            decode_point(
+                &decode("0100000000000000000000000000000000000000000000000000000000000000")
+                    .unwrap()
+            )
+            .unwrap(),
+            (
+                "0".parse::<Integer>().unwrap(),
+                "1".parse::<Integer>().unwrap()
+            )
+        );
+        assert_eq!(
+            decode_point(
+                &decode("7b0f068bdde1d396d95b97579ed07cc9cabc5af128b7fa3338f7aca485dc170b")
+                    .unwrap()
+            )
+            .unwrap(),
+            (
+                "18738815168440011986408904409747661355966848393371742103586138146960616269896"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "5017600804117403562852659704574511322216896914205922652106168593697487589243"
+                    .parse::<Integer>()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            decode_point(
+                &decode("299f6d20010556799ff82f2ad721bd15732f7533cfc6ad8bf333cd22166f42a8")
+                    .unwrap()
+            )
+            .unwrap(),
+            (
+                "11765910627670138205555954470128887569457785139558335884609577674421928602465"
+                    .parse::<Integer>()
+                    .unwrap(),
+                "18209892540234382838474494422429649302902580183111935078055540371838462697257"
+                    .parse::<Integer>()
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn ecvrf_decode_proof_test() {
+        assert_eq!(
+            ecvrf_decode_proof(
+                &decode("a80954531c41b09280438b805fb8264e20791a0fd011a18f6def7b9cc48315c9f4b41e93d8f4140c1ffc917c67640a45c66e7ce47d754462ab40aa0cce09c11b0234c0a8ba265e5fd27ed1d67bc4a701")
+                    .unwrap()
+            )
+            .unwrap(),
+            (
+                (
+                    "27697607651988823115975462172016124959043654960543528824774351294042131512091"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "33056851164339470258906459114062521442851091569965281854821725995490451130792"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+                "91770691117758273713681408009594385652"
+                .parse::<Integer>()
+                .unwrap(),
+                "748732389381679406359389955750217672883708317852412390845739987821316042438"
+                .parse::<Integer>()
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            ecvrf_decode_proof(
+                &decode("9061d3a7c68c64efecda0463eb2163ef7793d7049785510b07e3c381f2bbdd62e11d9b22504c906a80b74cff39ccf52389c1cc3b9fc5c7c3a5a716cbac23541a8267a18750ca7f1f26b9ef4dcb226a0f")
+                    .unwrap()
+            )
+            .unwrap(),
+            (
+                (
+                    "20145088686991237763563330138422416133011020304089967570913862140895427216188"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "44718429527015941074873329327942383821260886483403263181075854270961588330896"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+                "47799234789388919003118978975460433377"
+                .parse::<Integer>()
+                .unwrap(),
+                "6972218658068131753903599998180446075911404073082034377012199676502466150793"
+                .parse::<Integer>()
+                .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn ecvrf_hash_points_test() {
+        assert_eq!(
+            ecvrf_hash_points(
+                &(Integer::from(1), Integer::from(2)),
+                &(Integer::from(3), Integer::from(4)),
+                &(Integer::from(5), Integer::from(6)),
+                &(Integer::from(7), Integer::from(8)),
+            ),
+            "161209729549110407160776210096078431864"
+                .parse::<Integer>()
+                .unwrap()
+        );
+        assert_eq!(
+            ecvrf_hash_points(
+                &(
+                    "20145088686991237763563330138422416133011020304089967570913862140895427216188"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "44718429527015941074873329327942383821260886483403263181075854270961588330896"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+                &(
+                    "5313863158657921736192767953913786084044359767756713289178739762614964543209"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "50988912630131679334181337403790444623412258884662970567487510258466540553771"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+                &(
+                    "7107631960465767869535429853349295352031173980104103285621849487667722533297"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "42878079319476036336137946623896330600009697504370825498274853352471200872065"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+                &(
+                    "12156183745850511073089323218562745643254017618359848732866684019020326374996"
+                        .parse::<Integer>()
+                        .unwrap(),
+                    "28984688919812345790446526728176753506503314096611481498246417562994872970561"
+                        .parse::<Integer>()
+                        .unwrap()
+                ),
+            ),
+            "233782579309306465553849508530338471250"
+                .parse::<Integer>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn i2osp_test() {
+        assert_eq!(i2osp(&"300".parse::<Integer>().unwrap(), 1), None);
+        assert_eq!(
+            encode(i2osp(&"200".parse::<Integer>().unwrap(), 1).unwrap()),
+            "c8"
+        );
+        assert_eq!(i2osp(&"55555".parse::<Integer>().unwrap(), 1), None);
+        assert_eq!(
+            encode(i2osp(&"55555".parse::<Integer>().unwrap(), 2).unwrap()),
+            "d903"
+        );
+        assert_eq!(i2osp(&"179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137216".parse::<Integer>().unwrap(), 128), None);
+        assert_eq!(
+            encode(i2osp(&"179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137215".parse::<Integer>().unwrap(), 128).unwrap()),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(
+            encode(i2osp(&"12156183745850511073089323218562745643254017618359848732866684019020326374996".parse::<Integer>().unwrap(), 128).unwrap()),
+            "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001ae027fb30a0ad4249925c94f4a2bfc6e0912f56ec69132788daf248bff20e54"
+        );
+    }
+
+    #[test]
+    fn os2ip_test() {
+        assert_eq!(os2ip(&vec![1, 2, 3]), "66051".parse::<Integer>().unwrap());
+        assert_eq!(
+            os2ip(&vec![
+                87, 99, 51, 71, 222, 66, 154, 126, 184, 43, 4, 251, 92, 179, 117, 77, 198, 21, 225,
+                149, 206, 82, 57, 150, 44, 149, 111, 204, 203, 185, 28, 254
+            ]),
+            "39526489612783863363061450190903516942151074871840484375217699171994072325374"
+                .parse::<Integer>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn expand_message_xmd_test() {
+        assert_eq!(
+            expand_message_xmd(&vec![] ,&*DST,&Integer::from(48)).unwrap(),
+            decode("de5b8109b80da1d4861defe3e20710c8ac2efe65d815bb79d0b0087ddb0667718adb94fa478843979611e80749109ca55881a12b9d64c9ae5f7b36075f8e0354").unwrap()
+        );
+        assert_eq!(
+            expand_message_xmd(&decode("0102040810204080ff").unwrap() ,&*DST,&Integer::from(48)).unwrap(),
+            decode("916b471e7c4d60e8a4ba6d0310e4e8de5a59d94011c4e8d2843d452a1651b9f854f5582788dec477b3811cd56973dbbba346a98877ffd1b61d045caccbdddbe8").unwrap()
+        );
+        assert_eq!(
+            expand_message_xmd(&decode("756f547ab8accc336a280f96343cfdbe9621935dcb452bba4f3460ef8f090883").unwrap() ,&*DST,&Integer::from(48)).unwrap(),
+            decode("365d2351f19838da62f7b68464f61e961a01cbc3fdde0099bdc3db6b3a9c3f8d23eeacc1865e570b063263d3e8ded3c4cd4a11566f96ca5f63d06bb65d815bb8").unwrap()
+        );
+    }
+
+    #[test]
+    fn hash_to_field_test() {
+        assert_eq!(
+            hash_to_field(&vec![], &Integer::from(1)).unwrap(),
+            "19984796091926620114398603282246129530205018809106914407141744082303129033320"
+                .parse::<Integer>()
+                .unwrap()
+        );
+        assert_eq!(
+            hash_to_field(&decode("0102040810204080ff").unwrap(), &Integer::from(1)).unwrap(),
+            "40866905167524404221649250981304847553674991259516901614549124933108104064175"
+                .parse::<Integer>()
+                .unwrap()
+        );
+        assert_eq!(
+            hash_to_field(
+                &decode("6073bd567edb2e1d6ef03cb70a54017ffd5b874b136bbbddfbc5a8af6606b697")
+                    .unwrap(),
+                &Integer::from(1)
+            )
+            .unwrap(),
+            "42190151610809284644600066009282933920020180701265092905748556772002395560942"
+                .parse::<Integer>()
+                .unwrap()
+        );
+        assert_eq!(
+            hash_to_field(
+                &decode("1152c7e217f100d85a6b7e51cb8e6c838a8fc8c95a5ab43ac7412a085cd67307431cd149b898b98c017fe1003bf848ad1dc2254b093497bfab90159ea54c5559")
+                    .unwrap(),
+                &Integer::from(1)
+            )
+            .unwrap(),
+            "7289615016767941863395051431412729080032480398674317575538643993554362504793"
+                .parse::<Integer>()
+                .unwrap()
+        );
+    }
 
     #[test]
     fn modulus_test() {
         assert_eq!(
-            modulus(&Integer::from(-4i8), &Integer::from(7i8)),
-            Integer::from(3i8)
+            modulus(&Integer::from(-4), &Integer::from(7)),
+            Integer::from(3)
         );
     }
 
