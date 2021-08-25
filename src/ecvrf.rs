@@ -1,4 +1,4 @@
-use hex::{decode, encode};
+use hex::decode;
 use rug::{integer::Order, Integer};
 use sha2::{Digest, Sha512};
 
@@ -123,7 +123,7 @@ pub fn decode_point(s: &[u8]) -> Option<(Integer, Integer)> {
 }
 
 pub fn modulus(a: &Integer, b: &Integer) -> Integer {
-    Integer::from(a + b) % b
+    Integer::from(Integer::from(a % b) + b) % b
 }
 
 pub fn inverse(a: &Integer) -> Integer {
@@ -191,6 +191,9 @@ pub fn i2osp(x: &Integer, x_len: u8) -> Option<Vec<u8>> {
     for i in (0..(x_len as usize)).rev() {
         digits[i] = (&tmp_x & Integer::from(255)).to_u8().unwrap();
         tmp_x >>= 8;
+        if tmp_x == 0 {
+            break;
+        }
     }
 
     Some(digits)
@@ -239,8 +242,8 @@ pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Ve
     gx1 = modulus(&(gx1 * x1.clone()), &*PRIME);
     gx1 = modulus(&(gx1 + 1), &*PRIME);
     gx1 = modulus(&(gx1 * x1.clone()), &*PRIME);
-    let mut x2 = modulus(&(-x1.clone() - &*A), &*PRIME);
-    let mut gx2 = modulus(&(tv1 * gx1.clone()), &*PRIME);
+    let x2 = modulus(&(-x1.clone() - &*A), &*PRIME);
+    let gx2 = modulus(&(tv1 * gx1.clone()), &*PRIME);
 
     let e2 = match Integer::from(
         gx1.pow_mod_ref(&(Integer::from(&*PRIME - 1) >> 1), &*PRIME)
@@ -260,10 +263,26 @@ pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Ve
         gx = gx1;
     }
 
-    let edwards_y = modulus(&(Integer::from(x.clone() - 1) * inverse(&(x + 1))), &*PRIME);
-    // edwards_y.to_di
+    let edwards_y = modulus(
+        &(Integer::from(x.clone() - 1) * inverse(&(x.clone() + 1))),
+        &*PRIME,
+    );
+    let mut h_prelim = decode_point(&edwards_y.to_digits::<u8>(Order::Lsf))?;
+    let y_coordinate = modulus(
+        &(Integer::from(&*SQRT_MINUS_A_PLUS_2 * &x) * inverse(&h_prelim.0)),
+        &*PRIME,
+    );
 
-    None
+    if modulus(&Integer::from(&y_coordinate * &y_coordinate), &*PRIME) != gx {
+        return None;
+    }
+
+    let e3 = Integer::from(&y_coordinate & 1).to_u8().unwrap() == 1;
+    if e2 ^ e3 {
+        h_prelim.0 = modulus(&-h_prelim.0, &*PRIME);
+    }
+
+    Some(encode_point(&scalar_multiply(&h_prelim, &*COFACTOR)?))
 }
 
 pub fn ecvrf_hash_points(
@@ -289,11 +308,11 @@ pub fn ecvrf_hash_points(
     Integer::from_digits(&truncated_c_string, Order::Lsf)
 }
 
-pub fn ecvrf_verify(y: Vec<u8>, pi: Vec<u8>, alpha: Vec<u8>) -> bool {
-    let (gamma, c, s) = some_or_return_false!(ecvrf_decode_proof(&pi));
+pub fn ecvrf_verify(y: &[u8], pi: &[u8], alpha: &[u8]) -> bool {
+    let (gamma, c, s) = some_or_return_false!(ecvrf_decode_proof(pi));
 
-    let h = some_or_return_false!(ecvrf_hash_to_curve_elligator2_25519(&y, &alpha));
-    let y_point = some_or_return_false!(decode_point(&y));
+    let h = some_or_return_false!(ecvrf_hash_to_curve_elligator2_25519(y, alpha));
+    let y_point = some_or_return_false!(decode_point(y));
 
     let h_point = some_or_return_false!(decode_point(&h));
 
@@ -315,6 +334,7 @@ pub fn ecvrf_verify(y: Vec<u8>, pi: Vec<u8>, alpha: Vec<u8>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex::encode;
 
     #[test]
     fn hash_test() {
@@ -659,9 +679,51 @@ mod tests {
     }
 
     #[test]
+    fn ecvrf_hash_to_curve_elligator2_25519_test() {
+        assert_eq!(
+            ecvrf_hash_to_curve_elligator2_25519(&[], &[]),
+            Some(
+                decode("0a9bd6360ece6617949a7cb1a1cd215c9c274d1bcc4dcd91d2a647e0734f58c9").unwrap()
+            )
+        );
+        assert_eq!(
+            ecvrf_hash_to_curve_elligator2_25519(
+                &decode("b47b98eec6e520da81cfd6102c92d66190d572ef278898cfc148b284df52381f")
+                    .unwrap(),
+                &[1, 2, 3]
+            ),
+            Some(
+                decode("51c6d59d27fdb0bc0da54636ee9ab6bae0bf9ef46a41cacf976a5abc0d854ccc").unwrap()
+            )
+        );
+        assert_eq!(
+            ecvrf_hash_to_curve_elligator2_25519(
+                &decode("6ee44650273767d0596c7c0e631861a36a34274503b7958969a445e6962ea738").unwrap(),
+                &decode("fcfb5ff956e3587cd345e15ab63a02e1b1943d9243befd1c5e03b108f04bc34fdc04a725790d455ae5fb03266afa7c962d4358b466dd8b03a988e9df039b8ace").unwrap()
+            ),
+            Some(
+                decode("99cfaaa3a43dcd5168cc4730afca6e9685987c0735e6340acfe3db6f72fdd949").unwrap()
+            )
+        );
+        assert_eq!(
+            ecvrf_hash_to_curve_elligator2_25519(
+                &decode("ecb8ff918f05ebf44ba5bf58867d157372a046a15a96cca44450a94cfed8855ff01cc75816ec3380f7bc4d84a7c1b9df843eaaa5e1d6114b8be13042b454661f").unwrap(),
+                &decode("954941e702b3825279370625925250c4110f74d4c022fcfcb90aac995561986424928feab8931d4d1b57d63402c7e307b02095e63773315c3e1fd36ae8e8f1dd").unwrap()
+            ),
+            Some(
+                decode("ec841063044dc0e1066a4838e526d373008315224697ce5b9497e1faf6deed91").unwrap()
+            )
+        );
+    }
+
+    #[test]
     fn modulus_test() {
         assert_eq!(
             modulus(&Integer::from(-4), &Integer::from(7)),
+            Integer::from(3)
+        );
+        assert_eq!(
+            modulus(&Integer::from(-11), &Integer::from(7)),
             Integer::from(3)
         );
     }
@@ -824,6 +886,81 @@ mod tests {
                     .parse::<Integer>()
                     .unwrap(),
             ))
+        );
+    }
+
+    #[test]
+    fn ecvrf_verify_from_draft09_test() {
+        assert_eq!(
+            ecvrf_verify(
+                &decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+                    .unwrap(),
+                &decode("7d9c633ffeee27349264cf5c667579fc583b4bda63ab71d001f89c10003ab46f25898f6bd7d4ed4c75f0282b0f7bb9d0e61b387b76db60b3cbf34bf09109ccb33fab742a8bddc0c8ba3caf5c0b75bb04").unwrap(),
+                &[]
+            ),
+            true
+        );
+        assert_eq!(
+            ecvrf_verify(
+                &decode("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+                    .unwrap(),
+                &decode("47b327393ff2dd81336f8a2ef10339112401253b3c714eeda879f12c509072ef9bf1a234f833f72d8fff36075fd9b836da28b5569e74caa418bae7ef521f2ddd35f5727d271ecc70b4a83c1fc8ebc40c").unwrap(),
+                &[114]
+            ),
+            true
+        );
+        assert_eq!(
+            ecvrf_verify(
+                &decode("fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025")
+                    .unwrap(),
+                &decode("926e895d308f5e328e7aa159c06eddbe56d06846abf5d98c2512235eaa57fdce6187befa109606682503b3a1424f0f729ca0418099fbd86a48093e6a8de26307b8d93e02da927e6dd5b73c8f119aee0f").unwrap(),
+                &[175, 130]
+            ),
+            true
+        );
+    }
+
+    #[test]
+    fn ecvrf_verify_additional_test() {
+        assert_eq!(
+            ecvrf_verify(
+                &decode("d4e03360381b0b07bb005090a389de57542e01a3e33fea4340ddcd5059016670")
+                    .unwrap(),
+                &decode("a80954531c41b09280438b805fb8264e20791a0fd011a18f6def7b9cc48315c9f4b41e93d8f4140c1ffc917c67640a45c66e7ce47d754462ab40aa0cce09c11b0234c0a8ba265e5fd27ed1d67bc4a701").unwrap(),
+                &decode("c3f2b31660de8bc95902b9103262cdb941f77376f5d3dbb7a3d5a387797f")
+                    .unwrap(),
+            ),
+            true
+        );
+        assert_eq!(
+            ecvrf_verify(
+                &decode("8dc04595b4799e105f3f299457f571c2be1dfef3931549bba440bc27410806ce")
+                    .unwrap(),
+                &decode("6cff0b3296e553becea46a815e5f4f1a6e56e671ec52d0dda9dba5ebe7d700e7aacd4ec879ec71a4147ce578d677677ce477dc773f7534a44b9c1830b782f128fff3c2d789ea7652894335db46c18a0e").unwrap(),
+                &decode("2e98dccaadc86adbed25801a9a9dcfa6264319ddafe83a89c51f3c6d199d")
+                    .unwrap(),
+            ),
+            true
+        );
+        assert_eq!(
+            ecvrf_verify(
+                &decode("e6e798f938b551b606cc9abd558c7d1b38d6d58cb7c8dff62abb4e876dd8c7e5")
+                    .unwrap(),
+                &decode("f34ef549e6acdcc2d485acf7257bdde249e7ad8fa63f067045b5e869b454fdf2787d800dc218964a66a61c17d762dbc866027ff82bbdc3cb49024113a5a29ed233000d9c3fd73b9b72f0eebd4e20770e").unwrap(),
+                &decode("8ccbd82f7ff2b38c6d48d01e481b2d4faf7171805fd7f2d39ef4c4f19b9496e81dab81")
+                    .unwrap(),
+            ),
+            true
+        );
+        assert_eq!(
+            ecvrf_verify(
+                &decode("b78bfbbd68ca4915c854a4cc04afa79ab35a393931a5388db306da94a9d0d2c3")
+                    .unwrap(),
+                &decode("8057fc57942da97027ea37353d22c6e63c81961574424e1f60e406a0791d6a460700700bf2926d16872a7e8240898db4f239e0f68473503c61f74f19a27c182373ec99ab5c871b2305f5d7bd1c95da08").unwrap(),
+                &decode("34a11e19fd3650e9b7818fc33a1e0fc02c44557ac8")
+                    .unwrap(),
+            ),
+            true
         );
     }
 }
