@@ -1,5 +1,5 @@
 use hex::decode;
-use rug::{integer::Order, Integer};
+use rug::{integer::Order, Complete, Integer};
 use sha2::{Digest, Sha512};
 
 macro_rules! some_or_return_false {
@@ -68,9 +68,7 @@ pub fn hash(h: &[u8]) -> Vec<u8> {
 }
 
 pub fn x_recover(y: &Integer) -> Integer {
-    let xx =
-        (y * y - Integer::from(1)) * inverse(&((&*D) * Integer::from(y * y) + Integer::from(1)));
-
+    let xx = (y * y - Integer::from(1)) * inverse(&((&*D) * (y * y).complete() + Integer::from(1)));
     let mut x = Integer::from(
         xx.pow_mod_ref(&((&*PRIME + Integer::from(3)) >> 3), &*PRIME)
             .unwrap(),
@@ -123,7 +121,7 @@ pub fn decode_point(s: &[u8]) -> Option<(Integer, Integer)> {
 }
 
 pub fn modulus(a: &Integer, b: &Integer) -> Integer {
-    Integer::from(Integer::from(a % b) + b) % b
+    a.clone().div_rem_euc_ref(b).complete().1
 }
 
 pub fn inverse(a: &Integer) -> Integer {
@@ -131,12 +129,12 @@ pub fn inverse(a: &Integer) -> Integer {
 }
 
 pub fn edwards_add(a: &(Integer, Integer), b: &(Integer, Integer)) -> (Integer, Integer) {
-    let x1_y2 = Integer::from(&a.0 * &b.1);
-    let x2_y1 = Integer::from(&a.1 * &b.0);
+    let x1_y2 = (&a.0 * &b.1).complete();
+    let x2_y1 = (&a.1 * &b.0).complete();
     let all = D.clone() * &x1_y2 * &x2_y1;
     let x3 = (x1_y2 + x2_y1) * inverse(&(Integer::from(1) + &all));
-    let y3 = (Integer::from(&a.0 * &b.0) + Integer::from(&a.1 * &b.1))
-        * inverse(&(Integer::from(1) - &all));
+    let y3 =
+        ((&a.0 * &b.0).complete() + (&a.1 * &b.1).complete()) * inverse(&(Integer::from(1) - &all));
     (modulus(&x3, &*PRIME), modulus(&y3, &*PRIME))
 }
 
@@ -230,14 +228,14 @@ pub fn hash_to_field(msg: &[u8], count: &Integer) -> Option<Integer> {
 pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Vec<u8>> {
     let u = hash_to_field(&[y, alpha].concat(), &Integer::from(1))?;
 
-    let mut tv1 = Integer::from(&u * &u);
+    let mut tv1 = (&u * &u).complete();
     tv1 = modulus(&(2 * tv1), &*PRIME);
     if tv1 == Integer::from(&*PRIME - 1) {
         tv1 = Integer::from(0);
     }
 
     let mut x1 = inverse(&modulus(&(tv1.clone() + 1), &*PRIME));
-    x1 = modulus(&(Integer::from(-&*A) * x1), &*PRIME);
+    x1 = modulus(&((-&*A).complete() * x1), &*PRIME);
     let mut gx1 = modulus(&(x1.clone() + &*A), &*PRIME);
     gx1 = modulus(&(gx1 * x1.clone()), &*PRIME);
     gx1 = modulus(&(gx1 + 1), &*PRIME);
@@ -269,11 +267,11 @@ pub fn ecvrf_hash_to_curve_elligator2_25519(y: &[u8], alpha: &[u8]) -> Option<Ve
     );
     let mut h_prelim = decode_point(&edwards_y.to_digits::<u8>(Order::Lsf))?;
     let y_coordinate = modulus(
-        &(Integer::from(&*SQRT_MINUS_A_PLUS_2 * &x) * inverse(&h_prelim.0)),
+        &((&*SQRT_MINUS_A_PLUS_2 * &x).complete() * inverse(&h_prelim.0)),
         &*PRIME,
     );
 
-    if modulus(&Integer::from(&y_coordinate * &y_coordinate), &*PRIME) != gx {
+    if modulus(&(&y_coordinate * &y_coordinate).complete(), &*PRIME) != gx {
         return None;
     }
 
