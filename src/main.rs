@@ -509,7 +509,7 @@ fn main() {
            )
     ];
 
-    for s in samples.iter() {
+    for s in samples[..1].iter() {
         let start = Instant::now();
         let verify_result = ecvrf::ecvrf_verify(s.0, s.1, s.2);
         let duration = start.elapsed();
