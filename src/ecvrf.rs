@@ -13,20 +13,11 @@ macro_rules! some_or_return_false {
 
 lazy_static! {
     static ref SUITE_STRING: Vec<u8> = decode("04").unwrap();
-    static ref BITS: usize = 256;
     static ref PRIME: Integer =
         "57896044618658097711785492504343953926634992332820282019728792003956564819949"
             .parse::<Integer>()
             .unwrap();
-    static ref ORDER: Integer =
-        "7237005577332262213973186563042994240857116359379907606001950938285454250989"
-            .parse::<Integer>()
-            .unwrap();
     static ref COFACTOR: Integer = "8".parse::<Integer>().unwrap();
-    static ref TWO_INV: Integer =
-        "28948022309329048855892746252171976963317496166410141009864396001978282409975"
-            .parse::<Integer>()
-            .unwrap();
     static ref II: Integer =
         "19681161376707505956807079304988542015446066515923890162744021073123829784752"
             .parse::<Integer>()
@@ -38,14 +29,6 @@ lazy_static! {
             .unwrap();
     static ref SQRT_MINUS_A_PLUS_2: Integer =
         "6853475219497561581579357271197624642482790079785650197046958215289687604742"
-            .parse::<Integer>()
-            .unwrap();
-    static ref BASE_X: Integer =
-        "15112221349535400772501151409588531511454012693041857206046113283949847762202"
-            .parse::<Integer>()
-            .unwrap();
-    static ref BASE_Y: Integer =
-        "46316835694926478169428394003475163141307993866256225615783033603165251855960"
             .parse::<Integer>()
             .unwrap();
     static ref BASE: (Integer, Integer) = (
